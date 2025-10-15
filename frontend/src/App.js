@@ -3,15 +3,17 @@ import "@/App.css";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import axios from "axios";
 import EthCard from "@/components/EthCard";
+import PolygonCard from "@/components/PolygonCard";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Search, Activity, Shield } from "lucide-react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Search, Activity, Shield, Hexagon } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
-// Default contract address (PoSELedger)
+// Default contract address (PoSELedger on Polygon Amoy)
 const DEFAULT_ADDRESS = "0xC5c39D1f465cf664dcE5F3745836597CEe4EA028";
 
 const Home = () => {
