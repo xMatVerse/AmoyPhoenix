@@ -6,7 +6,7 @@ import { ExternalLink, RefreshCw, TrendingUp, Wallet } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+const API = BACKEND_URL ? `${BACKEND_URL}/api` : '/api';
 
 const EthCard = ({ address, title = 'Ethereum Address' }) => {
   const [balance, setBalance] = useState(null);

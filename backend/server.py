@@ -11,7 +11,6 @@ import uuid
 from datetime import datetime, timezone
 import httpx
 import asyncio
-from functools import lru_cache
 import hashlib
 import hmac
 
@@ -32,7 +31,19 @@ api_router = APIRouter(prefix="/api")
 
 # Environment variables
 ETHERSCAN_API_KEY = os.environ.get('ETHERSCAN_API_KEY', '')
+POLYGONSCAN_API_KEY = os.environ.get('POLYGONSCAN_API_KEY', ETHERSCAN_API_KEY)
+EMERGENT_AGENT_URL = os.environ.get('EMERGENT_AGENT_URL', DEFAULT_AGENT_URL)
 PHOENIX_WEBHOOK_SECRET = os.environ.get('PHOENIX_WEBHOOK_SECRET', 'change-me-in-production')
+
+# Service helpers
+from services.emergent_agent import (
+    DEFAULT_AGENT_URL,
+    EmergentAgentError,
+    fetch_balance as fetch_emergent_balance,
+    fetch_transactions as fetch_emergent_transactions,
+    health_check as emergent_health_check,
+)
+from services.pricing import estimate_usd_from_wei, get_eth_price_usd, get_matic_price_usd
 
 # In-memory cache with TTL
 cache_store = {}
@@ -65,6 +76,25 @@ class EthTransaction(BaseModel):
     timestamp: datetime
     block_number: str
     gas_used: str
+
+
+class EmergentAgentBalance(BaseModel):
+    source: str = Field(default='emergent-agent')
+    address: str
+    balance_wei: str
+    balance_eth: float
+    usd_estimate: Optional[float] = None
+    status: str
+    error: Optional[str] = None
+
+
+class EmergentAgentTransactions(BaseModel):
+    source: str = Field(default='emergent-agent')
+    address: str
+    count: int
+    transactions: List[Dict[str, Any]]
+    status: str
+    error: Optional[str] = None
 
 class PhoenixWebhookPayload(BaseModel):
     event_type: str
@@ -119,15 +149,11 @@ async def fetch_etherscan_balance(address: str) -> dict:
         balance_wei = result['result']
         balance_eth = float(balance_wei) / 1e18
         
-        # Get ETH price from CoinGecko
+        # Get ETH price from CoinGecko via pricing helper
         balance_usd = None
-        try:
-            price_response = await client.get('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd')
-            if price_response.status_code == 200:
-                eth_price = price_response.json()['ethereum']['usd']
-                balance_usd = balance_eth * eth_price
-        except:
-            pass
+        eth_price = await get_eth_price_usd()
+        if eth_price is not None:
+            balance_usd = balance_eth * eth_price
         
         data = {
             'balance_wei': balance_wei,
@@ -266,7 +292,10 @@ async def get_polygon_balance(address: str):
     """Get Polygon balance for an address"""
     try:
         # Use Polygon Amoy testnet API
-        url = f"https://api-amoy.polygonscan.com/api?module=account&action=balance&address={address}&tag=latest&apikey={ETHERSCAN_API_KEY}"
+        url = (
+            "https://api-amoy.polygonscan.com/api?module=account&action=balance"
+            f"&address={address}&tag=latest&apikey={POLYGONSCAN_API_KEY}"
+        )
         
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(url)
@@ -279,15 +308,11 @@ async def get_polygon_balance(address: str):
             balance_wei = result['result']
             balance_matic = float(balance_wei) / 1e18
             
-            # Get MATIC price
+            # Get MATIC price via pricing helper
             balance_usd = None
-            try:
-                price_response = await client.get('https://api.coingecko.com/api/v3/simple/price?ids=matic-network&vs_currencies=usd')
-                if price_response.status_code == 200:
-                    matic_price = price_response.json()['matic-network']['usd']
-                    balance_usd = balance_matic * matic_price
-            except:
-                pass
+            matic_price = await get_matic_price_usd()
+            if matic_price is not None:
+                balance_usd = balance_matic * matic_price
             
             return EthBalance(
                 address=address,
@@ -306,7 +331,11 @@ async def get_polygon_balance(address: str):
 async def get_polygon_transactions(address: str, limit: int = 3):
     """Get recent Polygon transactions for an address"""
     try:
-        url = f"https://api-amoy.polygonscan.com/api?module=account&action=txlist&address={address}&startblock=0&endblock=99999999&page=1&offset={limit}&sort=desc&apikey={ETHERSCAN_API_KEY}"
+        url = (
+            "https://api-amoy.polygonscan.com/api?module=account&action=txlist"
+            f"&address={address}&startblock=0&endblock=99999999&page=1&offset={limit}"
+            f"&sort=desc&apikey={POLYGONSCAN_API_KEY}"
+        )
         
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(url)
@@ -347,6 +376,99 @@ async def get_eth_transactions(address: str, limit: int = 3):
         raise HTTPException(status_code=503, detail=f"Etherscan API unavailable: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@api_router.get(
+    "/emergent/etherscan/balance/{address}",
+    response_model=EmergentAgentBalance
+)
+async def get_emergent_balance(address: str):
+    """Retrieve the balance of an address via the Emergent Agent proxy."""
+
+    try:
+        payload = await fetch_emergent_balance(address, base_url=EMERGENT_AGENT_URL)
+    except (httpx.HTTPError, EmergentAgentError) as exc:
+        return EmergentAgentBalance(
+            address=address,
+            balance_wei='0',
+            balance_eth=0.0,
+            usd_estimate=None,
+            status='error',
+            error=str(exc)
+        )
+
+    balance_wei = payload.get('result', '0')
+    try:
+        balance_eth = int(balance_wei) / 1e18
+    except (TypeError, ValueError):
+        balance_eth = 0.0
+
+    usd_estimate = await estimate_usd_from_wei(balance_wei)
+
+    return EmergentAgentBalance(
+        address=address,
+        balance_wei=balance_wei,
+        balance_eth=balance_eth,
+        usd_estimate=usd_estimate,
+        status='success'
+    )
+
+
+@api_router.get(
+    "/emergent/etherscan/transactions/{address}",
+    response_model=EmergentAgentTransactions
+)
+async def get_emergent_transactions(address: str, limit: int = 10):
+    """Retrieve transactions for an address via the Emergent Agent proxy."""
+
+    try:
+        raw_transactions = await fetch_emergent_transactions(
+            address,
+            limit=limit,
+            base_url=EMERGENT_AGENT_URL,
+        )
+    except (httpx.HTTPError, EmergentAgentError) as exc:
+        return EmergentAgentTransactions(
+            address=address,
+            count=0,
+            transactions=[],
+            status='error',
+            error=str(exc)
+        )
+
+    formatted_transactions: List[Dict[str, Any]] = []
+    for tx in raw_transactions:
+        try:
+            value_eth = float(tx.get('value', 0)) / 1e18
+        except (TypeError, ValueError):
+            value_eth = 0.0
+
+        timestamp_raw = tx.get('timeStamp')
+        timestamp = int(timestamp_raw) if timestamp_raw else None
+
+        formatted_transactions.append({
+            'hash': tx.get('hash'),
+            'from': tx.get('from'),
+            'to': tx.get('to'),
+            'value_eth': value_eth,
+            'timestamp': timestamp,
+            'blockNumber': tx.get('blockNumber'),
+            'confirmations': tx.get('confirmations')
+        })
+
+    return EmergentAgentTransactions(
+        address=address,
+        count=len(formatted_transactions),
+        transactions=formatted_transactions,
+        status='success'
+    )
+
+
+@api_router.get("/emergent/health")
+async def emergent_agent_health_check():
+    """Lightweight health indicator for the Emergent Agent service."""
+
+    return await emergent_health_check(base_url=EMERGENT_AGENT_URL)
 
 
 # Phoenix webhook endpoint
@@ -419,3 +541,4 @@ logger = logging.getLogger(__name__)
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+

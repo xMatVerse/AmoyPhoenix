@@ -4,169 +4,216 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import axios from "axios";
 import EthCard from "@/components/EthCard";
 import PolygonCard from "@/components/PolygonCard";
+import EmergentAgentCard from "@/components/EmergentAgentCard";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Search, Activity, Shield, Hexagon } from "lucide-react";
+import { Search, Activity, Shield, Hexagon, Cpu } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+const API_BASE = BACKEND_URL ? `${BACKEND_URL}/api` : "/api";
 
 // Default contract address (PoSELedger on Polygon Amoy)
 const DEFAULT_ADDRESS = "0xC5c39D1f465cf664dcE5F3745836597CEe4EA028";
 
-const Home = () => {
-  const [customAddress, setCustomAddress] = useState("");
-  const [searchAddress, setSearchAddress] = useState(DEFAULT_ADDRESS);
-  const [apiStatus, setApiStatus] = useState(null);
-
-  const checkApiStatus = async () => {
-    try {
-      const response = await axios.get(`${API}/`);
-      setApiStatus(response.data.message);
-    } catch (e) {
-      console.error(e, `Error checking API status`);
-      setApiStatus("API Unavailable");
-    }
-  };
+const Dashboard = () => {
+  const [address, setAddress] = useState(DEFAULT_ADDRESS);
+  const [inputValue, setInputValue] = useState(DEFAULT_ADDRESS);
+  const [systemHealth, setSystemHealth] = useState({ emergent: { status: "checking" } });
 
   useEffect(() => {
-    checkApiStatus();
+    let isMounted = true;
+
+    const loadHealth = async () => {
+      try {
+        const [apiResponse, emergentResponse] = await Promise.allSettled([
+          axios.get(`${API_BASE}/`),
+          axios.get(`${API_BASE}/emergent/health`)
+        ]);
+
+        if (!isMounted) return;
+
+        setSystemHealth({
+          api: apiResponse.status === "fulfilled"
+            ? { status: "healthy", message: apiResponse.value.data.message }
+            : { status: "unhealthy", message: apiResponse.reason?.message },
+          emergent: emergentResponse.status === "fulfilled"
+            ? emergentResponse.value.data
+            : { status: "unhealthy", message: emergentResponse.reason?.message }
+        });
+      } catch (error) {
+        if (!isMounted) return;
+        setSystemHealth((prev) => ({
+          ...prev,
+          emergent: { status: "unhealthy", message: error.message }
+        }));
+      }
+    };
+
+    loadHealth();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   const handleSearch = () => {
-    if (customAddress.trim()) {
-      setSearchAddress(customAddress.trim());
+    const trimmed = inputValue.trim();
+    if (trimmed.length !== 42 || !trimmed.startsWith("0x")) {
+      alert("Por favor, insira um endereço Ethereum válido (0x...)");
+      return;
     }
+    setAddress(trimmed);
   };
 
-  const handleKeyPress = (e) => {
-    if (e.key === 'Enter') {
+  const handleKeyDown = (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
       handleSearch();
     }
   };
 
+  const isDefaultAddress = address.toLowerCase() === DEFAULT_ADDRESS.toLowerCase();
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
-      {/* Header */}
-      <header className="bg-white border-b border-gray-200 shadow-sm">
-        <div className="container mx-auto px-4 py-6">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <Shield className="h-8 w-8 text-blue-600" />
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50">
+      <header className="border-b bg-white/80 backdrop-blur">
+        <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-8 md:flex-row md:items-center md:justify-between">
+          <div className="text-center md:text-left">
+            <div className="flex items-center justify-center gap-3 md:justify-start">
+              <Shield className="h-9 w-9 text-blue-600" />
               <div>
-                <h1 className="text-2xl font-bold text-gray-900">
-                  Ethereum Dashboard
-                </h1>
+                <h1 className="text-3xl font-bold text-gray-900">Emergent Dashboard</h1>
                 <p className="text-sm text-gray-500">
-                  Monitor addresses & transactions
+                  Monitoramento unificado Ethereum, Polygon Amoy e Emergent Agent
                 </p>
               </div>
             </div>
-            {apiStatus && (
-              <div className="flex items-center gap-2 px-3 py-2 bg-green-50 rounded-lg">
-                <Activity className="h-4 w-4 text-green-600" />
-                <span className="text-sm font-medium text-green-700">{apiStatus}</span>
-              </div>
-            )}
+          </div>
+          <div className="flex flex-col items-center gap-2 text-sm md:items-end">
+            <span
+              className={`rounded-full px-3 py-1 ${
+                systemHealth.api?.status === "healthy"
+                  ? "bg-green-100 text-green-700"
+                  : "bg-red-100 text-red-700"
+              }`}
+            >
+              API: {systemHealth.api?.status || "checking"}
+            </span>
+            <span
+              className={`rounded-full px-3 py-1 ${
+                systemHealth.emergent?.status === "healthy"
+                  ? "bg-green-100 text-green-700"
+                  : "bg-yellow-100 text-yellow-700"
+              }`}
+            >
+              Emergent Agent: {systemHealth.emergent?.status || "checking"}
+            </span>
           </div>
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="container mx-auto px-4 py-8">
-        <div className="max-w-6xl mx-auto space-y-8">
-          {/* Search Section */}
+      <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-10">
+        <Card className="shadow-md">
+          <CardHeader>
+            <CardTitle>🔍 Consulta de Endereço Blockchain</CardTitle>
+            <CardDescription>
+              Digite qualquer endereço EVM (0x...) para visualizar saldo e transações nas redes disponíveis.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex flex-col gap-3 md:flex-row">
+              <Input
+                value={inputValue}
+                onChange={(event) => setInputValue(event.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="0x..."
+                className="font-mono text-lg"
+              />
+              <Button onClick={handleSearch} className="md:w-auto">
+                <Search className="mr-2 h-4 w-4" /> Buscar
+              </Button>
+            </div>
+            <p className="mt-3 text-xs text-gray-500">
+              {isDefaultAddress
+                ? `Monitorando contrato PoSELedger: ${DEFAULT_ADDRESS}`
+                : `Consultando endereço: ${address}`}
+            </p>
+          </CardContent>
+        </Card>
+
+        <Tabs defaultValue="emergent" className="w-full">
+          <TabsList className="grid w-full grid-cols-3">
+            <TabsTrigger value="emergent" className="flex items-center gap-2">
+              <Cpu className="h-4 w-4" /> Emergent Agent
+            </TabsTrigger>
+            <TabsTrigger value="ethereum" className="flex items-center gap-2">
+              <Activity className="h-4 w-4" /> Ethereum
+            </TabsTrigger>
+            <TabsTrigger value="polygon" className="flex items-center gap-2">
+              <Hexagon className="h-4 w-4" /> Polygon Amoy
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="emergent" className="mt-6 space-y-4">
+            <EmergentAgentCard address={address} />
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Sobre o Emergent Agent</CardTitle>
+                <CardDescription>
+                  Serviço proxy resiliente para consultas Etherscan, fornecendo redundância e resiliência.
+                </CardDescription>
+              </CardHeader>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="ethereum" className="mt-6">
+            <EthCard
+              address={address}
+              title={isDefaultAddress ? "PoSELedger (Ethereum)" : "Ethereum Address"}
+            />
+          </TabsContent>
+
+          <TabsContent value="polygon" className="mt-6">
+            <PolygonCard
+              address={address}
+              title={isDefaultAddress ? "PoSELedger (Polygon Amoy)" : "Polygon Address"}
+            />
+          </TabsContent>
+        </Tabs>
+
+        <div className="grid gap-4 md:grid-cols-3">
           <Card>
             <CardHeader>
-              <CardTitle>Search Ethereum Address</CardTitle>
+              <CardTitle className="text-sm">Cobertura Multirrede</CardTitle>
               <CardDescription>
-                Enter any Ethereum address to view balance and recent transactions
+                Ethereum Mainnet, Polygon Amoy e Emergent Agent trabalhando em conjunto.
               </CardDescription>
             </CardHeader>
-            <CardContent>
-              <div className="flex gap-2">
-                <Input
-                  placeholder="0x..."
-                  value={customAddress}
-                  onChange={(e) => setCustomAddress(e.target.value)}
-                  onKeyPress={handleKeyPress}
-                  className="font-mono"
-                />
-                <Button onClick={handleSearch}>
-                  <Search className="h-4 w-4 mr-2" />
-                  Search
-                </Button>
-              </div>
-            </CardContent>
           </Card>
-
-          {/* Default PoSELedger Contract */}
-          <div className="space-y-4">
-            <h2 className="text-xl font-semibold text-gray-800 flex items-center gap-2">
-              <Shield className="h-5 w-5 text-blue-600" />
-              PoSELedger Contract Monitor
-            </h2>
-            <EthCard 
-              address={DEFAULT_ADDRESS} 
-              title="PoSELedger Contract"
-            />
-          </div>
-
-          {/* Custom Search Result */}
-          {searchAddress !== DEFAULT_ADDRESS && (
-            <div className="space-y-4">
-              <h2 className="text-xl font-semibold text-gray-800">
-                Search Result
-              </h2>
-              <EthCard 
-                address={searchAddress}
-                title="Custom Address"
-              />
-            </div>
-          )}
-
-          {/* Info Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-sm">Etherscan Integration</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-xs text-gray-600">
-                  Real-time data from Etherscan API with 30s cache
-                </p>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-sm">Phoenix Forense Ready</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-xs text-gray-600">
-                  Webhook endpoint available for forensic integration
-                </p>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-sm">MongoDB Cache</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-xs text-gray-600">
-                  Offline fallback when API quota exceeded
-                </p>
-              </CardContent>
-            </Card>
-          </div>
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">Integração Phoenix Forense</CardTitle>
+              <CardDescription>
+                Webhooks e ancoragem prontos para ingestão e auditoria de evidências.
+              </CardDescription>
+            </CardHeader>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">Monitoramento Contínuo</CardTitle>
+              <CardDescription>
+                Indicadores de saúde automáticos e consulta redundante para alta disponibilidade.
+              </CardDescription>
+            </CardHeader>
+          </Card>
         </div>
       </main>
 
-      {/* Footer */}
-      <footer className="mt-16 py-6 border-t border-gray-200 bg-white">
-        <div className="container mx-auto px-4 text-center text-sm text-gray-500">
-          <p>Ethereum Dashboard v1.0 | Powered by Etherscan API</p>
+      <footer className="mt-10 border-t bg-white py-6">
+        <div className="mx-auto max-w-6xl px-4 text-center text-sm text-gray-500">
+          Emergent Dashboard • Phoenix Forense • PoSELedger • {new Date().getFullYear()}
         </div>
       </footer>
     </div>
@@ -175,13 +222,11 @@ const Home = () => {
 
 function App() {
   return (
-    <div className="App">
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Home />} />
-        </Routes>
-      </BrowserRouter>
-    </div>
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<Dashboard />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
 

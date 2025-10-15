@@ -6,7 +6,7 @@ import { ExternalLink, RefreshCw, TrendingUp, Hexagon } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+const API = BACKEND_URL ? `${BACKEND_URL}/api` : '/api';
 
 const PolygonCard = ({ address, title = 'Polygon Address' }) => {
   const [balance, setBalance] = useState(null);
