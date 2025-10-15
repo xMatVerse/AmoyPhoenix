@@ -32,6 +32,7 @@ api_router = APIRouter(prefix="/api")
 
 # Environment variables
 ETHERSCAN_API_KEY = os.environ.get('ETHERSCAN_API_KEY', '')
+POLYGONSCAN_API_KEY = os.environ.get('POLYGONSCAN_API_KEY', ETHERSCAN_API_KEY)
 PHOENIX_WEBHOOK_SECRET = os.environ.get('PHOENIX_WEBHOOK_SECRET', 'change-me-in-production')
 
 # In-memory cache with TTL
@@ -266,7 +267,10 @@ async def get_polygon_balance(address: str):
     """Get Polygon balance for an address"""
     try:
         # Use Polygon Amoy testnet API
-        url = f"https://api-amoy.polygonscan.com/api?module=account&action=balance&address={address}&tag=latest&apikey={ETHERSCAN_API_KEY}"
+        url = (
+            "https://api-amoy.polygonscan.com/api?module=account&action=balance"
+            f"&address={address}&tag=latest&apikey={POLYGONSCAN_API_KEY}"
+        )
         
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(url)
@@ -306,7 +310,11 @@ async def get_polygon_balance(address: str):
 async def get_polygon_transactions(address: str, limit: int = 3):
     """Get recent Polygon transactions for an address"""
     try:
-        url = f"https://api-amoy.polygonscan.com/api?module=account&action=txlist&address={address}&startblock=0&endblock=99999999&page=1&offset={limit}&sort=desc&apikey={ETHERSCAN_API_KEY}"
+        url = (
+            "https://api-amoy.polygonscan.com/api?module=account&action=txlist"
+            f"&address={address}&startblock=0&endblock=99999999&page=1&offset={limit}"
+            f"&sort=desc&apikey={POLYGONSCAN_API_KEY}"
+        )
         
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(url)
