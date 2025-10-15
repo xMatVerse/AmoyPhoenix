@@ -260,6 +260,83 @@ async def get_eth_balance(address: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Polygon endpoints
+@api_router.get("/polygon/balance/{address}", response_model=EthBalance)
+async def get_polygon_balance(address: str):
+    """Get Polygon balance for an address"""
+    try:
+        # Use Polygon Amoy testnet API
+        url = f"https://api-amoy.polygonscan.com/api?module=account&action=balance&address={address}&tag=latest&apikey={ETHERSCAN_API_KEY}"
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            result = response.json()
+            
+            if result['status'] != '1':
+                raise HTTPException(status_code=400, detail=result.get('message', 'PolygonScan API error'))
+            
+            balance_wei = result['result']
+            balance_matic = float(balance_wei) / 1e18
+            
+            # Get MATIC price
+            balance_usd = None
+            try:
+                price_response = await client.get('https://api.coingecko.com/api/v3/simple/price?ids=matic-network&vs_currencies=usd')
+                if price_response.status_code == 200:
+                    matic_price = price_response.json()['matic-network']['usd']
+                    balance_usd = balance_matic * matic_price
+            except:
+                pass
+            
+            return EthBalance(
+                address=address,
+                balance_wei=balance_wei,
+                balance_eth=balance_matic,  # Using eth field for MATIC
+                balance_usd=balance_usd,
+                last_updated=datetime.now(timezone.utc)
+            )
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=503, detail=f"PolygonScan API unavailable: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@api_router.get("/polygon/txs/{address}", response_model=List[EthTransaction])
+async def get_polygon_transactions(address: str, limit: int = 3):
+    """Get recent Polygon transactions for an address"""
+    try:
+        url = f"https://api-amoy.polygonscan.com/api?module=account&action=txlist&address={address}&startblock=0&endblock=99999999&page=1&offset={limit}&sort=desc&apikey={ETHERSCAN_API_KEY}"
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            result = response.json()
+            
+            if result['status'] != '1':
+                if result.get('message') == 'No transactions found':
+                    return []
+                raise HTTPException(status_code=400, detail=result.get('message', 'PolygonScan API error'))
+            
+            transactions = []
+            for tx in result['result'][:limit]:
+                transactions.append(EthTransaction(
+                    hash=tx['hash'],
+                    from_address=tx['from'],
+                    to_address=tx['to'],
+                    value_eth=float(tx['value']) / 1e18,
+                    timestamp=datetime.fromtimestamp(int(tx['timeStamp']), tz=timezone.utc),
+                    block_number=tx['blockNumber'],
+                    gas_used=tx['gasUsed']
+                ))
+            
+            return transactions
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=503, detail=f"PolygonScan API unavailable: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @api_router.get("/eth/txs/{address}", response_model=List[EthTransaction])
 async def get_eth_transactions(address: str, limit: int = 3):
     """Get recent transactions for an address"""
