@@ -37,7 +37,7 @@ const PolygonCard = ({ address, title = 'Polygon Address' }) => {
       setLastUpdated(new Date());
     } catch (err) {
       console.error('Error fetching Polygon data:', err);
-      setError(err.response?.data?.detail || 'Failed to fetch data from PolygonScan');
+      setError(err.response?.data?.detail || 'Failed to fetch data from Etherscan');
     } finally {
       setLoading(false);
     }

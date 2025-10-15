@@ -38,6 +38,7 @@ Emergent Dashboard/
 │   ├── /api/forensic/*     # Integração Phoenix Forense
 │   └── /services/          # Serviços modulares
 │       ├── emergent_agent.py
+│       ├── etherscan_v2.py
 │       └── pricing.py
 ├── ⚛️ Frontend (React)
 │   ├── EthCard.jsx         # Componente Ethereum
@@ -194,8 +195,8 @@ from services.pricing import (
   "frontend": "operational",
   "backend": "operational", 
   "blockchain_apis": {
-    "etherscan": "connected",
-    "polygonscan": "connected_via_etherscan",
+    "etherscan_mainnet": "connected",
+    "etherscan_polygon_amoy": "connected",
     "emergent_agent": "connected"
   },
   "database": "connected",
@@ -212,6 +213,7 @@ from services.pricing import (
 │   ├── server.py           # Aplicação FastAPI principal
 │   ├── services/           # Serviços modulares
 │   │   ├── emergent_agent.py
+│   │   ├── etherscan_v2.py
 │   │   └── pricing.py
 │   └── __init__.py
 ./frontend/

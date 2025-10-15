@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 import httpx
 
@@ -33,15 +33,28 @@ async def get_matic_price_usd() -> Optional[float]:
     return await _fetch_price(MATIC_PRICE_URL)
 
 
-async def estimate_usd_from_wei(balance_wei: str) -> Optional[float]:
+async def estimate_usd_from_token_wei(
+    balance_wei: str,
+    price_getter: Callable[[], Awaitable[Optional[float]]],
+) -> Optional[float]:
+    """Convert a wei-denominated balance into USD using the provided price getter."""
+
     try:
         wei_int = int(balance_wei)
     except (TypeError, ValueError):
         return None
 
-    price = await get_eth_price_usd()
+    price = await price_getter()
     if price is None:
         return None
 
-    balance_eth = wei_int / 1e18
-    return balance_eth * price
+    balance_native = wei_int / 1e18
+    return balance_native * price
+
+
+async def estimate_usd_from_wei(balance_wei: str) -> Optional[float]:
+    return await estimate_usd_from_token_wei(balance_wei, get_eth_price_usd)
+
+
+async def estimate_usd_from_matic_wei(balance_wei: str) -> Optional[float]:
+    return await estimate_usd_from_token_wei(balance_wei, get_matic_price_usd)

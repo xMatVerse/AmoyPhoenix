@@ -6,7 +6,7 @@ import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Callable, Awaitable
 import uuid
 from datetime import datetime, timezone
 import httpx
@@ -29,21 +29,33 @@ app = FastAPI()
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
-# Environment variables
-ETHERSCAN_API_KEY = os.environ.get('ETHERSCAN_API_KEY', '')
-POLYGONSCAN_API_KEY = os.environ.get('POLYGONSCAN_API_KEY', ETHERSCAN_API_KEY)
-EMERGENT_AGENT_URL = os.environ.get('EMERGENT_AGENT_URL', DEFAULT_AGENT_URL)
-PHOENIX_WEBHOOK_SECRET = os.environ.get('PHOENIX_WEBHOOK_SECRET', 'change-me-in-production')
+# Environment defaults
+ETH_CHAIN_ID = 1
+POLYGON_AMOY_CHAIN_ID = 80_002
 
 # Service helpers
 from services.emergent_agent import (
-    DEFAULT_AGENT_URL,
+    DEFAULT_AGENT_URL as EMERGENT_DEFAULT_AGENT_URL,
     EmergentAgentError,
     fetch_balance as fetch_emergent_balance,
     fetch_transactions as fetch_emergent_transactions,
     health_check as emergent_health_check,
 )
-from services.pricing import estimate_usd_from_wei, get_eth_price_usd, get_matic_price_usd
+from services.etherscan_v2 import (
+    EtherscanError,
+    get_account_balance as get_v2_balance,
+    get_account_transactions as get_v2_transactions,
+)
+from services.pricing import (
+    estimate_usd_from_token_wei,
+    estimate_usd_from_wei,
+    get_eth_price_usd,
+    get_matic_price_usd,
+)
+
+# Environment variables (after service imports to leverage defaults)
+EMERGENT_AGENT_URL = os.environ.get('EMERGENT_AGENT_URL', EMERGENT_DEFAULT_AGENT_URL)
+PHOENIX_WEBHOOK_SECRET = os.environ.get('PHOENIX_WEBHOOK_SECRET', 'change-me-in-production')
 
 # In-memory cache with TTL
 cache_store = {}
@@ -66,6 +78,8 @@ class EthBalance(BaseModel):
     balance_wei: str
     balance_eth: float
     balance_usd: Optional[float] = None
+    symbol: str = Field(default="ETH")
+    chain_id: int = Field(default=ETH_CHAIN_ID)
     last_updated: datetime
 
 class EthTransaction(BaseModel):
@@ -116,128 +130,126 @@ def is_cache_valid(cache_entry: dict) -> bool:
 
 
 # Etherscan API functions
-async def fetch_etherscan_balance(address: str) -> dict:
-    """Fetch balance from Etherscan API"""
-    cache_key = get_cache_key(f"balance:{address}")
-    
-    # Check in-memory cache first
+async def fetch_etherscan_balance(
+    address: str,
+    *,
+    chain_id: int,
+    symbol: str,
+    price_getter: Optional[Callable[[], Awaitable[Optional[float]]]] = None,
+) -> dict:
+    """Fetch and cache the balance for a given address/chain pair."""
+
+    cache_key = get_cache_key(f"balance:{chain_id}:{address}")
+
     if cache_key in cache_store and is_cache_valid(cache_store[cache_key]):
         return cache_store[cache_key]['data']
-    
-    # Check MongoDB cache
-    cached = await db.eth_cache.find_one({'type': 'balance', 'address': address})
+
+    cache_type = f"balance:{chain_id}"
+    cached = await db.eth_cache.find_one({'type': cache_type, 'address': address})
     if cached and is_cache_valid({'cached_at': cached['cached_at']}):
         data = {
             'balance_wei': cached['balance_wei'],
-            'balance_eth': cached['balance_eth'],
-            'balance_usd': cached.get('balance_usd')
+            'balance_native': cached['balance_native'],
+            'balance_usd': cached.get('balance_usd'),
+            'symbol': cached.get('symbol', symbol),
         }
         cache_store[cache_key] = {'data': data, 'cached_at': cached['cached_at']}
         return data
-    
-    # Fetch from Etherscan
-    url = f"https://api.etherscan.io/api?module=account&action=balance&address={address}&tag=latest&apikey={ETHERSCAN_API_KEY}"
-    
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.get(url)
-        response.raise_for_status()
-        result = response.json()
-        
-        if result['status'] != '1':
-            raise HTTPException(status_code=400, detail=result.get('message', 'Etherscan API error'))
-        
-        balance_wei = result['result']
-        balance_eth = float(balance_wei) / 1e18
-        
-        # Get ETH price from CoinGecko via pricing helper
-        balance_usd = None
-        eth_price = await get_eth_price_usd()
-        if eth_price is not None:
-            balance_usd = balance_eth * eth_price
-        
-        data = {
+
+    balance_wei = await get_v2_balance(address, chain_id=chain_id)
+    try:
+        balance_native = int(balance_wei) / 1e18
+    except (TypeError, ValueError):
+        balance_native = 0.0
+
+    balance_usd = None
+    if price_getter is not None:
+        balance_usd = await estimate_usd_from_token_wei(balance_wei, price_getter)
+
+    data = {
+        'balance_wei': balance_wei,
+        'balance_native': balance_native,
+        'balance_usd': balance_usd,
+        'symbol': symbol,
+    }
+
+    now = datetime.now(timezone.utc)
+    cache_store[cache_key] = {'data': data, 'cached_at': now}
+
+    await db.eth_cache.update_one(
+        {'type': cache_type, 'address': address},
+        {'$set': {
             'balance_wei': balance_wei,
-            'balance_eth': balance_eth,
-            'balance_usd': balance_usd
-        }
-        
-        # Update caches
-        now = datetime.now(timezone.utc)
-        cache_store[cache_key] = {'data': data, 'cached_at': now}
-        
-        # Update MongoDB
-        await db.eth_cache.update_one(
-            {'type': 'balance', 'address': address},
-            {'$set': {
-                'balance_wei': balance_wei,
-                'balance_eth': balance_eth,
-                'balance_usd': balance_usd,
-                'cached_at': now,
-                'updated_at': now
-            }},
-            upsert=True
-        )
-        
-        return data
+            'balance_native': balance_native,
+            'balance_usd': balance_usd,
+            'symbol': symbol,
+            'cached_at': now,
+            'updated_at': now,
+        }},
+        upsert=True
+    )
+
+    return data
 
 
-async def fetch_etherscan_transactions(address: str, limit: int = 3) -> list:
-    """Fetch recent transactions from Etherscan API"""
-    cache_key = get_cache_key(f"txs:{address}")
-    
-    # Check in-memory cache
+async def fetch_etherscan_transactions(
+    address: str,
+    *,
+    chain_id: int,
+    limit: int = 3,
+) -> List[Dict[str, Any]]:
+    """Fetch and cache the latest transactions for an address/chain pair."""
+
+    cache_key = get_cache_key(f"txs:{chain_id}:{address}")
+
     if cache_key in cache_store and is_cache_valid(cache_store[cache_key]):
         return cache_store[cache_key]['data']
-    
-    # Check MongoDB cache
-    cached = await db.eth_cache.find_one({'type': 'transactions', 'address': address})
+
+    cache_type = f"transactions:{chain_id}"
+    cached = await db.eth_cache.find_one({'type': cache_type, 'address': address})
     if cached and is_cache_valid({'cached_at': cached['cached_at']}):
         data = cached['transactions'][:limit]
         cache_store[cache_key] = {'data': data, 'cached_at': cached['cached_at']}
         return data
-    
-    # Fetch from Etherscan
-    url = f"https://api.etherscan.io/api?module=account&action=txlist&address={address}&startblock=0&endblock=99999999&page=1&offset={limit}&sort=desc&apikey={ETHERSCAN_API_KEY}"
-    
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.get(url)
-        response.raise_for_status()
-        result = response.json()
-        
-        if result['status'] != '1':
-            # If no transactions, return empty list
-            if result.get('message') == 'No transactions found':
-                return []
-            raise HTTPException(status_code=400, detail=result.get('message', 'Etherscan API error'))
-        
-        transactions = []
-        for tx in result['result'][:limit]:
-            transactions.append({
-                'hash': tx['hash'],
-                'from_address': tx['from'],
-                'to_address': tx['to'],
-                'value_eth': float(tx['value']) / 1e18,
-                'timestamp': datetime.fromtimestamp(int(tx['timeStamp']), tz=timezone.utc),
-                'block_number': tx['blockNumber'],
-                'gas_used': tx['gasUsed']
-            })
-        
-        # Update caches
-        now = datetime.now(timezone.utc)
-        cache_store[cache_key] = {'data': transactions, 'cached_at': now}
-        
-        # Update MongoDB
-        await db.eth_cache.update_one(
-            {'type': 'transactions', 'address': address},
-            {'$set': {
-                'transactions': transactions,
-                'cached_at': now,
-                'updated_at': now
-            }},
-            upsert=True
-        )
-        
-        return transactions
+
+    transactions_raw = await get_v2_transactions(address, chain_id=chain_id, limit=limit)
+
+    transactions: List[Dict[str, Any]] = []
+    for tx in transactions_raw[:limit]:
+        try:
+            timestamp = datetime.fromtimestamp(int(tx.get('timeStamp', 0)), tz=timezone.utc)
+        except (TypeError, ValueError, OSError):
+            timestamp = datetime.now(timezone.utc)
+
+        try:
+            value_eth = float(tx.get('value', 0)) / 1e18
+        except (TypeError, ValueError):
+            value_eth = 0.0
+
+        transactions.append({
+            'hash': tx.get('hash'),
+            'from_address': tx.get('from'),
+            'to_address': tx.get('to'),
+            'value_eth': value_eth,
+            'timestamp': timestamp,
+            'block_number': tx.get('blockNumber'),
+            'gas_used': tx.get('gasUsed'),
+        })
+
+    now = datetime.now(timezone.utc)
+    cache_store[cache_key] = {'data': transactions, 'cached_at': now}
+
+    await db.eth_cache.update_one(
+        {'type': cache_type, 'address': address},
+        {'$set': {
+            'transactions': transactions,
+            'cached_at': now,
+            'updated_at': now,
+        }},
+        upsert=True
+    )
+
+    return transactions[:limit]
 
 
 # Routes
@@ -272,15 +284,22 @@ async def get_status_checks():
 async def get_eth_balance(address: str):
     """Get Ethereum balance for an address"""
     try:
-        data = await fetch_etherscan_balance(address)
+        data = await fetch_etherscan_balance(
+            address,
+            chain_id=ETH_CHAIN_ID,
+            symbol="ETH",
+            price_getter=get_eth_price_usd,
+        )
         return EthBalance(
             address=address,
             balance_wei=data['balance_wei'],
-            balance_eth=data['balance_eth'],
+            balance_eth=data['balance_native'],
             balance_usd=data.get('balance_usd'),
+            symbol=data.get('symbol', 'ETH'),
+            chain_id=ETH_CHAIN_ID,
             last_updated=datetime.now(timezone.utc)
         )
-    except httpx.HTTPError as e:
+    except (httpx.HTTPError, EtherscanError) as e:
         raise HTTPException(status_code=503, detail=f"Etherscan API unavailable: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -291,38 +310,23 @@ async def get_eth_balance(address: str):
 async def get_polygon_balance(address: str):
     """Get Polygon balance for an address"""
     try:
-        # Use Polygon Amoy testnet API
-        url = (
-            "https://api-amoy.polygonscan.com/api?module=account&action=balance"
-            f"&address={address}&tag=latest&apikey={POLYGONSCAN_API_KEY}"
+        data = await fetch_etherscan_balance(
+            address,
+            chain_id=POLYGON_AMOY_CHAIN_ID,
+            symbol="MATIC",
+            price_getter=get_matic_price_usd,
         )
-        
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            result = response.json()
-            
-            if result['status'] != '1':
-                raise HTTPException(status_code=400, detail=result.get('message', 'PolygonScan API error'))
-            
-            balance_wei = result['result']
-            balance_matic = float(balance_wei) / 1e18
-            
-            # Get MATIC price via pricing helper
-            balance_usd = None
-            matic_price = await get_matic_price_usd()
-            if matic_price is not None:
-                balance_usd = balance_matic * matic_price
-            
-            return EthBalance(
-                address=address,
-                balance_wei=balance_wei,
-                balance_eth=balance_matic,  # Using eth field for MATIC
-                balance_usd=balance_usd,
-                last_updated=datetime.now(timezone.utc)
-            )
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=503, detail=f"PolygonScan API unavailable: {str(e)}")
+        return EthBalance(
+            address=address,
+            balance_wei=data['balance_wei'],
+            balance_eth=data['balance_native'],
+            balance_usd=data.get('balance_usd'),
+            symbol=data.get('symbol', 'MATIC'),
+            chain_id=POLYGON_AMOY_CHAIN_ID,
+            last_updated=datetime.now(timezone.utc)
+        )
+    except (httpx.HTTPError, EtherscanError) as e:
+        raise HTTPException(status_code=503, detail=f"Etherscan API unavailable: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -331,37 +335,14 @@ async def get_polygon_balance(address: str):
 async def get_polygon_transactions(address: str, limit: int = 3):
     """Get recent Polygon transactions for an address"""
     try:
-        url = (
-            "https://api-amoy.polygonscan.com/api?module=account&action=txlist"
-            f"&address={address}&startblock=0&endblock=99999999&page=1&offset={limit}"
-            f"&sort=desc&apikey={POLYGONSCAN_API_KEY}"
+        transactions = await fetch_etherscan_transactions(
+            address,
+            chain_id=POLYGON_AMOY_CHAIN_ID,
+            limit=limit,
         )
-        
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            result = response.json()
-            
-            if result['status'] != '1':
-                if result.get('message') == 'No transactions found':
-                    return []
-                raise HTTPException(status_code=400, detail=result.get('message', 'PolygonScan API error'))
-            
-            transactions = []
-            for tx in result['result'][:limit]:
-                transactions.append(EthTransaction(
-                    hash=tx['hash'],
-                    from_address=tx['from'],
-                    to_address=tx['to'],
-                    value_eth=float(tx['value']) / 1e18,
-                    timestamp=datetime.fromtimestamp(int(tx['timeStamp']), tz=timezone.utc),
-                    block_number=tx['blockNumber'],
-                    gas_used=tx['gasUsed']
-                ))
-            
-            return transactions
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=503, detail=f"PolygonScan API unavailable: {str(e)}")
+        return [EthTransaction(**tx) for tx in transactions]
+    except (httpx.HTTPError, EtherscanError) as e:
+        raise HTTPException(status_code=503, detail=f"Etherscan API unavailable: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -370,9 +351,13 @@ async def get_polygon_transactions(address: str, limit: int = 3):
 async def get_eth_transactions(address: str, limit: int = 3):
     """Get recent transactions for an address"""
     try:
-        transactions = await fetch_etherscan_transactions(address, limit)
+        transactions = await fetch_etherscan_transactions(
+            address,
+            chain_id=ETH_CHAIN_ID,
+            limit=limit,
+        )
         return [EthTransaction(**tx) for tx in transactions]
-    except httpx.HTTPError as e:
+    except (httpx.HTTPError, EtherscanError) as e:
         raise HTTPException(status_code=503, detail=f"Etherscan API unavailable: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
